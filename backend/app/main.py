@@ -1,5 +1,6 @@
 import json
 import os
+
 from contextlib import asynccontextmanager
 from datetime import date as date_type
 
@@ -14,6 +15,10 @@ from app.services.reference_data import seed_reference_data
 from app.ml.train import MODEL_DIR, HORIZONS
 
 
+# ============================================================
+# PATHS
+# ============================================================
+
 BACKEND_DIR = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
 )
@@ -26,10 +31,15 @@ RAW_CSV_PATH = os.path.join(
 )
 
 
+# ============================================================
+# SEED FREIGHT HISTORY
+# ============================================================
+
 def seed_freight_history_if_empty(db) -> int:
     """
     Automatically seed freight history when the database is empty.
     """
+
     row_count = (
         db.execute(
             select(func.count()).select_from(FreightRate)
@@ -41,6 +51,7 @@ def seed_freight_history_if_empty(db) -> int:
         return 0
 
     import pandas as pd
+
     from app.services.ingestion import ingest_dataframe
     from app.utils.synthetic_data import generate_synthetic_dataset
 
@@ -75,10 +86,15 @@ def seed_freight_history_if_empty(db) -> int:
     return report.rows_inserted
 
 
+# ============================================================
+# SEED MODEL RUN HISTORY
+# ============================================================
+
 def seed_model_run_history(db):
     """
     Populate model_runs from bundled training metadata.
     """
+
     meta_dir = os.path.join(
         BACKEND_DIR,
         "data",
@@ -91,6 +107,7 @@ def seed_model_run_history(db):
     written = 0
 
     for horizon in HORIZONS:
+
         meta_path = os.path.join(
             meta_dir,
             f"model_h{horizon}_meta.json",
@@ -135,6 +152,7 @@ def seed_model_run_history(db):
             )
 
             try:
+
                 values = {
                     "training_start": date_type.fromisoformat(
                         meta["training_start"]
@@ -169,9 +187,7 @@ def seed_model_run_history(db):
                         )
                     ),
 
-                    "horizon_days": int(
-                        horizon
-                    ),
+                    "horizon_days": int(horizon),
 
                     "is_best_model": (
                         model_name
@@ -187,14 +203,18 @@ def seed_model_run_history(db):
                 continue
 
             if existing is None:
+
                 db.add(
                     ModelRun(
                         model_name=model_name,
                         **values,
                     )
                 )
+
             else:
+
                 for key, value in values.items():
+
                     setattr(
                         existing,
                         key,
@@ -209,6 +229,10 @@ def seed_model_run_history(db):
     return written
 
 
+# ============================================================
+# APPLICATION LIFESPAN
+# ============================================================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -217,15 +241,21 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
 
     try:
+
         seed_reference_data(db)
         seed_freight_history_if_empty(db)
         seed_model_run_history(db)
 
     finally:
+
         db.close()
 
     yield
 
+
+# ============================================================
+# FASTAPI APPLICATION
+# ============================================================
 
 app = FastAPI(
     title="Intelligent Freight Forecasting & Chartering Decision Support",
@@ -249,49 +279,36 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
+
     allow_origins=[
-        # Production Vercel deployments
+        # --------------------------------------------------------
+        # Current Vercel deployment
+        # --------------------------------------------------------
+        "https://premium-8ih5yvvfr-divyanshu19283-maxs-projects.vercel.app",
+
+        # --------------------------------------------------------
+        # Other known Vercel deployments
+        # --------------------------------------------------------
         "https://freight-puce.vercel.app",
         "https://freight-sih.vercel.app",
         "https://frieght-sih-ltk6.vercel.app",
-
-        # Current Vercel deployment
         "https://freight-sih-ltk6-g2ymg0cbz-divyanshu19283-maxs-projects.vercel.app",
 
+        # --------------------------------------------------------
         # Local development
+        # --------------------------------------------------------
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+
         "http://localhost:5174",
         "http://127.0.0.1:5174",
+
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ],
 
-    # Allow Vercel preview deployments
+    # Allow all Vercel preview deployments.
     allow_origin_regex=r"^https://.*\.vercel\.app$",
-
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-app.add_middleware(
-    CORSMiddleware,
-
-    allow_origins=ALLOWED_ORIGINS,
-
-    # Allow Vercel preview/deployment URLs.
-    #
-    # Example:
-    # https://frieght-sih-ltk6-g2ymg0cbz-divyanshu19283-maxs-projects.vercel.app
-    #
-    # IMPORTANT:
-    # "frieght" matches your actual project naming.
-    allow_origin_regex=(
-        r"^https://frieght-[a-z0-9-]+-"
-        r"divyanshu19283-maxs-projects\.vercel\.app$"
-    ),
 
     allow_credentials=True,
 
@@ -318,6 +335,7 @@ app.include_router(chat.router)
 
 @app.get("/")
 def root():
+
     return {
         "service": "freight-forecasting-backend",
         "status": "ok",
@@ -338,16 +356,21 @@ def health():
     db_status = "disconnected"
 
     try:
+
         db = SessionLocal()
 
         try:
+
             db.execute(text("SELECT 1"))
+
             db_status = "connected"
 
         finally:
+
             db.close()
 
     except Exception:
+
         db_status = "disconnected"
 
     model_loaded = all(
