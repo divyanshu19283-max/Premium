@@ -1,10 +1,9 @@
-// TanStack Query hooks with live backend and deterministic demo fallback.
+// TanStack Query hooks with live backend.
 import { useQuery, useMutation, keepPreviousData } from "@tanstack/react-query";
 import { api, ApiClientError, getIntegratedDecision, getMarketSignals } from "./api";
-import { DEMO_SUMMARY, DEMO_EDA, buildDemoForecast, buildDemoWhatIf, DEMO_OPTIMIZE, DEMO_RECOMMENDATIONS, DEMO_SCENARIOS, DEMO_MODEL_RUNS, DEMO_FORECAST_HISTORY } from "./demo";
+import { DEMO_SUMMARY, DEMO_EDA, buildDemoForecast, DEMO_OPTIMIZE, DEMO_RECOMMENDATIONS, DEMO_SCENARIOS, DEMO_MODEL_RUNS, DEMO_FORECAST_HISTORY } from "./demo";
 import type { RoutesResponse, DataSummary, EDAStats, ForecastResult, WhatIfInput, WhatIfResult, OptimizeResult, RecommendationHistoryItem, ScenarioHistoryItem, ModelRun, ForecastHistoryItem, IntegratedDecisionResult } from "./types";
 
-// Production uses the real FastAPI service. Demo fallback remains available if the service is temporarily unavailable.
 const DEMO_MODE = false;
 
 const DEMO_ROUTES: RoutesResponse = {
@@ -93,8 +92,12 @@ export function useForecastHistory() {
   return useQuery<ForecastHistoryItem[]>({ queryKey: ["forecast-history"], queryFn: async () => { if (DEMO_MODE) return DEMO_FORECAST_HISTORY; try { return await api.forecastHistory(); } catch (e) { if (isOffline(e)) return DEMO_FORECAST_HISTORY; throw e; } }, retry: 0 });
 }
 
+// What-If is always live: never replace a real backend failure with fabricated demo values.
 export function useWhatIf() {
-  return useMutation<WhatIfResult & { _demo?: boolean }, ApiClientError, WhatIfInput>({ mutationFn: async input => { if (DEMO_MODE) return { ...buildDemoWhatIf(input), _demo: true }; try { return await api.whatif(input); } catch (e) { if (isOffline(e)) return { ...buildDemoWhatIf(input), _demo: true }; throw e; } }, retry: 0 });
+  return useMutation<WhatIfResult, ApiClientError, WhatIfInput>({
+    mutationFn: input => api.whatif(input),
+    retry: 0,
+  });
 }
 
 export function useOptimize(body: { origin: string; destination: string; vessel: string } | null) {
