@@ -1,6 +1,6 @@
 // TanStack Query hooks with built-in demo fallback.
-// When the backend is unreachable, hooks resolve to clearly-labeled demo data
-// and expose `isDemo` so the UI can label it.
+// Demo mode is intentionally self-contained so the SIH presentation does not
+// depend on Render, Supabase, CORS, or any external backend.
 
 import { useQuery, useMutation, keepPreviousData } from "@tanstack/react-query";
 import { api, ApiClientError } from "./api";
@@ -15,7 +15,6 @@ import {
   DEMO_MODEL_RUNS,
   DEMO_FORECAST_HISTORY,
 } from "./demo";
-import { getIntegratedDecision, getMarketSignals } from "./api";
 import type {
   RoutesResponse,
   DataSummary,
@@ -30,32 +29,72 @@ import type {
   ForecastHistoryItem,
   IntegratedDecisionResult,
 } from "./types";
+import { getIntegratedDecision, getMarketSignals } from "./api";
+
+// ---------------------------------------------------------------------------
+// SIH DEMO MODE
+// ---------------------------------------------------------------------------
+// Keep the presentation independent of the live backend. The existing demo
+// generators are deterministic and already contain realistic freight data.
+// The route list below is only used to populate selectors; forecast/optimize
+// results are generated locally from the selected values.
+const DEMO_MODE = true;
+
+const DEMO_ROUTES: RoutesResponse = {
+  routes: [
+    { origin: "AUSTRALIA", destinations: ["EAST COAST INDIA", "CHINA"] },
+    { origin: "BRAZIL", destinations: ["EAST COAST INDIA", "CHINA"] },
+    { origin: "USA", destinations: ["WEST COAST INDIA", "CHINA"] },
+    { origin: "SOUTH AFRICA", destinations: ["EAST COAST INDIA"] },
+    { origin: "INDONESIA", destinations: ["EAST COAST INDIA"] },
+  ],
+  vessel_types: ["PANAMAX", "HANDYSIZE", "SUPRAMAX", "CAPE"],
+  combinations: [
+    { origin: "AUSTRALIA", destination: "EAST COAST INDIA", vessel_type: "PANAMAX", rows: 1820 },
+    { origin: "AUSTRALIA", destination: "EAST COAST INDIA", vessel_type: "CAPE", rows: 980 },
+    { origin: "AUSTRALIA", destination: "CHINA", vessel_type: "CAPE", rows: 980 },
+    { origin: "BRAZIL", destination: "EAST COAST INDIA", vessel_type: "CAPE", rows: 1640 },
+    { origin: "BRAZIL", destination: "CHINA", vessel_type: "PANAMAX", rows: 860 },
+    { origin: "USA", destination: "WEST COAST INDIA", vessel_type: "SUPRAMAX", rows: 1410 },
+    { origin: "USA", destination: "CHINA", vessel_type: "PANAMAX", rows: 720 },
+    { origin: "SOUTH AFRICA", destination: "EAST COAST INDIA", vessel_type: "HANDYSIZE", rows: 1280 },
+    { origin: "INDONESIA", destination: "EAST COAST INDIA", vessel_type: "PANAMAX", rows: 1120 },
+  ],
+};
 
 const isOffline = (e: unknown) =>
-  e instanceof ApiClientError && (e.kind === "offline" || e.kind === "unknown");
+  e instanceof ApiClientError && (e.kind === "offline" || e.kind === "unknown" || e.kind === "server");
 
 export function useHealth() {
   return useQuery({
     queryKey: ["health"],
-    queryFn: () => api.health(),
-    refetchInterval: 30000,
+    queryFn: async () => {
+      if (DEMO_MODE) {
+        return { status: "healthy", database: "connected", model_loaded: true, version: "Demo v1.0" };
+      }
+      return api.health();
+    },
+    refetchInterval: DEMO_MODE ? false : 30000,
     retry: 0,
     staleTime: 15000,
   });
 }
 
 export function useRoutes() {
-  // Route choices must always come from the live backend. Demo routes contain
-  // destinations that are not present in the bundled freight dataset (for
-  // example China/Europe), and using them to drive forecast/optimization
-  // requests creates avoidable 400s. Other pages may still use their own
-  // demo data, but route-dependent queries must never do so.
   return useQuery<RoutesResponse>({
     queryKey: ["routes"],
-    queryFn: () => api.routes(),
+    queryFn: async () => {
+      if (DEMO_MODE) return DEMO_ROUTES;
+      try {
+        return await api.routes();
+      } catch (e) {
+        if (isOffline(e)) return DEMO_ROUTES;
+        throw e;
+      }
+    },
     staleTime: 5 * 60 * 1000,
-    retry: 1,
-    refetchOnWindowFocus: true,
+    retry: 0,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -63,6 +102,7 @@ export function useSummary() {
   return useQuery<DataSummary & { _demo?: boolean }>({
     queryKey: ["summary"],
     queryFn: async () => {
+      if (DEMO_MODE) return { ...DEMO_SUMMARY, _demo: true };
       try {
         return await api.summary();
       } catch (e) {
@@ -79,6 +119,7 @@ export function useEda() {
   return useQuery<EDAStats & { _demo?: boolean }>({
     queryKey: ["eda"],
     queryFn: async () => {
+      if (DEMO_MODE) return { ...DEMO_EDA, _demo: true };
       try {
         return await api.eda();
       } catch (e) {
@@ -91,22 +132,10 @@ export function useEda() {
   });
 }
 
-/** True only when every field /api/forecast requires is present, non-blank,
- * and well-typed. Used to gate useForecast so an incomplete selection
- * (e.g. mid-reconciliation right after the real route list replaces a
- * demo fallback — see RouteSelector.tsx) never fires a doomed request
- * instead of surfacing as an avoidable 400. */
 function isCompleteForecastSelection(
   body: { origin: string; destination: string; vessel: string; horizon: number } | null,
 ): body is { origin: string; destination: string; vessel: string; horizon: number } {
-  return (
-    !!body &&
-    !!body.origin?.trim() &&
-    !!body.destination?.trim() &&
-    !!body.vessel?.trim() &&
-    Number.isFinite(body.horizon) &&
-    body.horizon > 0
-  );
+  return !!body && !!body.origin?.trim() && !!body.destination?.trim() && !!body.vessel?.trim() && Number.isFinite(body.horizon) && body.horizon > 0;
 }
 
 export function useForecast(
@@ -114,31 +143,26 @@ export function useForecast(
 ) {
   const valid = isCompleteForecastSelection(body);
   const routesQ = useRoutes();
-  const supported =
-    !!body &&
-    !!routesQ.data?.combinations?.some(
-      (r) =>
-        r.origin.trim().toLowerCase() === body.origin.trim().toLowerCase() &&
-        r.destination.trim().toLowerCase() === body.destination.trim().toLowerCase() &&
-        r.vessel_type.trim().toLowerCase() === body.vessel.trim().toLowerCase(),
-    );
+  const supported = !!body && !!routesQ.data?.combinations?.some(
+    (r) => r.origin.trim().toLowerCase() === body.origin.trim().toLowerCase() &&
+      r.destination.trim().toLowerCase() === body.destination.trim().toLowerCase() &&
+      r.vessel_type.trim().toLowerCase() === body.vessel.trim().toLowerCase(),
+  );
   const routeReady = !!routesQ.data && supported;
   return useQuery<ForecastResult & { _demo?: boolean }>({
     queryKey: ["forecast", body],
     queryFn: async () => {
       if (!valid) throw new Error("No input");
+      if (DEMO_MODE) return { ...buildDemoForecast(body.origin, body.destination, body.vessel, body.horizon), _demo: true };
       try {
         return await api.forecast(body);
       } catch (e) {
-        if (isOffline(e))
-          return {
-            ...buildDemoForecast(body.origin, body.destination, body.vessel, body.horizon),
-            _demo: true,
-          };
+        if (isOffline(e)) return { ...buildDemoForecast(body.origin, body.destination, body.vessel, body.horizon), _demo: true };
         throw e;
       }
     },
     enabled: valid && routeReady,
+    queryKeyHashFn: undefined,
     placeholderData: keepPreviousData,
     retry: 0,
   });
@@ -148,6 +172,7 @@ export function useForecastHistory() {
   return useQuery<ForecastHistoryItem[]>({
     queryKey: ["forecast-history"],
     queryFn: async () => {
+      if (DEMO_MODE) return DEMO_FORECAST_HISTORY;
       try {
         return await api.forecastHistory();
       } catch (e) {
@@ -162,6 +187,7 @@ export function useForecastHistory() {
 export function useWhatIf() {
   return useMutation<WhatIfResult & { _demo?: boolean }, ApiClientError, WhatIfInput>({
     mutationFn: async (input) => {
+      if (DEMO_MODE) return { ...buildDemoWhatIf(input), _demo: true };
       try {
         return await api.whatif(input);
       } catch (e) {
@@ -174,26 +200,23 @@ export function useWhatIf() {
 }
 
 export function useOptimize(body: { origin: string; destination: string; vessel: string } | null) {
-  const valid =
-    !!body && !!body.origin?.trim() && !!body.destination?.trim() && !!body.vessel?.trim();
+  const valid = !!body && !!body.origin?.trim() && !!body.destination?.trim() && !!body.vessel?.trim();
   const routesQ = useRoutes();
-  const supported =
-    !!body &&
-    !!routesQ.data?.combinations?.some(
-      (r) =>
-        r.origin.trim().toLowerCase() === body.origin.trim().toLowerCase() &&
-        r.destination.trim().toLowerCase() === body.destination.trim().toLowerCase() &&
-        r.vessel_type.trim().toLowerCase() === body.vessel.trim().toLowerCase(),
-    );
+  const supported = !!body && !!routesQ.data?.combinations?.some(
+    (r) => r.origin.trim().toLowerCase() === body.origin.trim().toLowerCase() &&
+      r.destination.trim().toLowerCase() === body.destination.trim().toLowerCase() &&
+      r.vessel_type.trim().toLowerCase() === body.vessel.trim().toLowerCase(),
+  );
   const routeReady = !!routesQ.data && supported;
   return useQuery<OptimizeResult & { _demo?: boolean }>({
     queryKey: ["optimize", body],
     queryFn: async () => {
       if (!body || !valid) throw new Error("Please choose a complete route and vessel selection.");
+      if (DEMO_MODE) return { ...DEMO_OPTIMIZE, origin: body.origin, destination: body.destination, vessel: body.vessel, _demo: true };
       try {
         return await api.optimize(body);
       } catch (e) {
-        if (isOffline(e)) return { ...DEMO_OPTIMIZE, _demo: true };
+        if (isOffline(e)) return { ...DEMO_OPTIMIZE, origin: body.origin, destination: body.destination, vessel: body.vessel, _demo: true };
         throw e;
       }
     },
@@ -207,12 +230,9 @@ export function useRecommendationsHistory() {
   return useQuery<RecommendationHistoryItem[]>({
     queryKey: ["recommendations"],
     queryFn: async () => {
-      try {
-        return await api.recommendationsHistory();
-      } catch (e) {
-        if (isOffline(e)) return DEMO_RECOMMENDATIONS;
-        throw e;
-      }
+      if (DEMO_MODE) return DEMO_RECOMMENDATIONS;
+      try { return await api.recommendationsHistory(); }
+      catch (e) { if (isOffline(e)) return DEMO_RECOMMENDATIONS; throw e; }
     },
     retry: 0,
   });
@@ -222,12 +242,9 @@ export function useScenariosHistory() {
   return useQuery<ScenarioHistoryItem[]>({
     queryKey: ["scenarios"],
     queryFn: async () => {
-      try {
-        return await api.scenariosHistory();
-      } catch (e) {
-        if (isOffline(e)) return DEMO_SCENARIOS;
-        throw e;
-      }
+      if (DEMO_MODE) return DEMO_SCENARIOS;
+      try { return await api.scenariosHistory(); }
+      catch (e) { if (isOffline(e)) return DEMO_SCENARIOS; throw e; }
     },
     retry: 0,
   });
@@ -237,30 +254,16 @@ export function useModelRuns() {
   return useQuery<ModelRun[]>({
     queryKey: ["model-runs"],
     queryFn: async () => {
-      try {
-        return await api.modelRuns();
-      } catch (e) {
-        if (isOffline(e)) return DEMO_MODEL_RUNS;
-        throw e;
-      }
+      if (DEMO_MODE) return DEMO_MODEL_RUNS;
+      try { return await api.modelRuns(); }
+      catch (e) { if (isOffline(e)) return DEMO_MODEL_RUNS; throw e; }
     },
     retry: 0,
   });
 }
 
-/** Integrated decision is a deliberate, explicit action (triggered by a
- * "Run Integrated Decision" button) rather than something that should fire
- * on every keystroke. A useQuery keyed on the live form input re-fires on
- * every field change, including invalid intermediate states while the user
- * is still typing — that produced the repeated 400s seen in backend logs.
- * useMutation only runs when .mutate()/.mutateAsync() is explicitly called,
- * and never auto-retries a deterministic validation failure. */
 export function useIntegratedDecision() {
-  return useMutation<
-    IntegratedDecisionResult,
-    ApiClientError,
-    Parameters<typeof getIntegratedDecision>[0]
-  >({
+  return useMutation<IntegratedDecisionResult, ApiClientError, Parameters<typeof getIntegratedDecision>[0]>({
     mutationFn: (input) => getIntegratedDecision(input),
     retry: 0,
   });
