@@ -1,7 +1,14 @@
+import os
+
 import requests
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
-OLLAMA_MODEL = "llama3.2"
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/api/chat")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
+
+# Optional Gemini API. The existing Ollama backend remains the fallback.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
 
 
 SYSTEM_PROMPT = """
@@ -24,6 +31,12 @@ Important rules:
 
 
 def ask_llama(message: str, context: str = "") -> str:
+    """Use Gemini when GEMINI_API_KEY is configured, then the original
+    Ollama backend, then the deterministic local fallback.
+
+    The existing freight forecasting/decision backend is not replaced by
+    Gemini; Gemini is only an optional natural-language assistant layer.
+    """
     prompt = message
 
     if context:
@@ -37,6 +50,54 @@ USER QUESTION:
 {message}
 """
 
+    if GEMINI_API_KEY:
+        try:
+            return _ask_gemini(prompt)
+        except Exception:
+            # Keep the old backend available if Gemini is unavailable.
+            pass
+
+    return _ask_ollama(prompt)
+
+
+def _ask_gemini(prompt: str) -> str:
+    payload = {
+        "system_instruction": {
+            "parts": [{"text": SYSTEM_PROMPT}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.2,
+        },
+    }
+
+    response = requests.post(
+        GEMINI_URL,
+        params={"key": GEMINI_API_KEY},
+        json=payload,
+        timeout=120,
+    )
+    response.raise_for_status()
+    data = response.json()
+
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini returned no candidates")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text = "".join(part.get("text", "") for part in parts).strip()
+    if not text:
+        raise RuntimeError("Gemini returned an empty response")
+
+    return text
+
+
+def _ask_ollama(prompt: str) -> str:
     payload = {
         "model": OLLAMA_MODEL,
         "messages": [
@@ -61,13 +122,12 @@ USER QUESTION:
         response.raise_for_status()
 
         data = response.json()
-
         return data["message"]["content"]
 
     except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
-        return _local_fallback(message, context)
+        return _local_fallback(prompt)
     except Exception:
-        return _local_fallback(message, context)
+        return _local_fallback(prompt)
 
 
 def _local_fallback(message: str, context: str = "") -> str:
